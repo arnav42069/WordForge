@@ -8,11 +8,13 @@ Ships with a built-in local password model (localmodel.py); Ollama is optional.
 
 from __future__ import annotations
 
+import math
 import os
 import threading
 import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+from tkinter import font as tkfont
 
 import engine
 import catalog
@@ -147,10 +149,121 @@ def draw_header_pattern(canvas: tk.Canvas, w: int, h: int) -> None:
 
 def style_text(widget: tk.Text) -> tk.Text:
     widget.configure(bg=FIELD, fg=TEXT, insertbackground=ACCENT, relief="flat",
-                     highlightthickness=1, highlightbackground=BORDER,
-                     highlightcolor=ACCENT, borderwidth=0, padx=SP[2], pady=SP[2],
+                     highlightthickness=0, borderwidth=0, padx=SP[2], pady=SP[2],
                      selectbackground=ACCENT, selectforeground=INK)
     return widget
+
+
+# --------------------------------------------------------------------------- #
+# Squircle primitives — superellipse (|x|^n+|y|^n=1) rounded corners, since Tk
+# has no native border-radius. Everything border-y is drawn on a canvas.
+# --------------------------------------------------------------------------- #
+
+def squircle_points(x1, y1, x2, y2, r, n=4.0, steps=9):
+    r = max(2.0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    exp = 2.0 / n
+
+    def corner(cx, cy, sx, sy, rev):
+        p = []
+        for i in range(steps + 1):
+            a = (i / steps) * (math.pi / 2)
+            p.append((cx + sx * r * (math.cos(a) ** exp),
+                      cy + sy * r * (math.sin(a) ** exp)))
+        return p[::-1] if rev else p
+
+    pts = (corner(x2 - r, y1 + r, 1, -1, True)    # top -> right
+           + corner(x2 - r, y2 - r, 1, 1, False)  # right -> bottom
+           + corner(x1 + r, y2 - r, -1, 1, True)  # bottom -> left
+           + corner(x1 + r, y1 + r, -1, -1, False))  # left -> top
+    flat = []
+    for x, y in pts:
+        flat += [x, y]
+    return flat
+
+
+def _bg_of(parent):
+    try:
+        return parent.cget("background") or BG
+    except tk.TclError:
+        return BG
+
+
+class SquircleButton(tk.Canvas):
+    """A squircle push-button drawn on a canvas (ttk can't do rounded corners)."""
+
+    def __init__(self, parent, text, command=None, kind="normal",
+                 bg=None, padx=SP[4], pady=SP[2] + 1, **kw):
+        self.kind = kind
+        self.command = command
+        self.enabled = True
+        self._font = tkfont.Font(family="Segoe UI",
+                                 size=10 if kind == "accent" else 9,
+                                 weight="bold" if kind == "accent" else "normal")
+        tw = self._font.measure(text)
+        th = self._font.metrics("linespace")
+        self._bw = tw + padx * 2
+        self._bh = th + pady * 2
+        super().__init__(parent, width=self._bw, height=self._bh, bd=0,
+                         highlightthickness=0, bg=bg or _bg_of(parent),
+                         cursor="hand2", **kw)
+        self._text = text
+        self._draw(False)
+        self.bind("<Enter>", lambda e: self._draw(True))
+        self.bind("<Leave>", lambda e: self._draw(False))
+        self.bind("<ButtonPress-1>", lambda e: self._draw(True))
+        self.bind("<ButtonRelease-1>", self._release)
+
+    def _palette(self, hover):
+        if not self.enabled:
+            return BORDER, MUTED
+        if self.kind == "accent":
+            return (ACCENT2 if hover else ACCENT), INK
+        return (BORDER_HI if hover else SURFACE2), TEXT
+
+    def _draw(self, hover):
+        self.delete("all")
+        fill, fg = self._palette(hover)
+        r = min(self._bh * 0.5, 15)
+        self.create_polygon(squircle_points(1, 1, self._bw - 1, self._bh - 1, r),
+                            fill=fill, outline=fill, width=1)
+        self.create_text(self._bw / 2, self._bh / 2, text=self._text,
+                         fill=fg, font=self._font)
+
+    def _release(self, e):
+        if self.enabled and 0 <= e.x <= self._bw and 0 <= e.y <= self._bh and self.command:
+            self.command()
+        self._draw(False)
+
+    def set_enabled(self, enabled: bool):
+        self.enabled = enabled
+        self.configure(cursor="hand2" if enabled else "arrow")
+        self._draw(False)
+
+
+class SquircleField(tk.Canvas):
+    """A container that draws a squircle border and holds an inner tk widget
+    (Entry / Text / Treeview) that fills it. Gives every input a squircle edge."""
+
+    def __init__(self, parent, inner_factory, bg=None, pad=SP[2],
+                 fill=FIELD, height=None, **kw):
+        self._bg = bg or _bg_of(parent)
+        self._pad = pad
+        self._fill = fill
+        super().__init__(parent, bd=0, highlightthickness=0, bg=self._bg, **kw)
+        self.inner = inner_factory(self)
+        self._win = self.create_window(pad, pad, anchor="nw", window=self.inner)
+        if height:
+            self.configure(height=height)
+        self.bind("<Configure>", self._on_resize)
+
+    def _on_resize(self, e):
+        self.delete("border")
+        r = min(e.height * 0.42, 14)
+        self.create_polygon(squircle_points(1, 1, e.width - 1, e.height - 1, r),
+                            fill=self._fill, outline=BORDER, width=1, tags="border")
+        self.tag_lower("border")
+        self.itemconfigure(self._win, width=e.width - 2 * self._pad,
+                           height=e.height - 2 * self._pad)
 
 
 def run_thread(fn):
@@ -183,8 +296,8 @@ class GenTab(ttk.Frame):
         ttk.Label(base_line, text="Builds on:", style="Hint.TLabel").pack(side="left")
         ttk.Label(base_line, textvariable=app.base_vars[profile],
                   style="Hint.TLabel").pack(side="left", padx=(4, 0))
-        ttk.Button(base_line, text="Change base…",
-                   command=lambda: app.choose_base(profile)).pack(side="left", padx=(8, 0))
+        SquircleButton(base_line, "Change base…",
+                       command=lambda: app.choose_base(profile)).pack(side="left", padx=(8, 0))
 
         r = 1
         if wifi:
@@ -206,9 +319,14 @@ class GenTab(ttk.Frame):
         opt.grid(row=r, column=0, columnspan=4, sticky="w", pady=(10, 4)); r += 1
         self.use_leet = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Leetspeak variants", variable=self.use_leet).pack(side="left")
-        ttk.Label(opt, text="Length (records):", style="Muted.TLabel").pack(side="left", padx=(18, 4))
+        ttk.Label(opt, text="Length (records):", style="Muted.TLabel").pack(side="left", padx=(SP[5], SP[1]))
         self.max_out = tk.StringVar(value="250000")
-        ttk.Entry(opt, textvariable=self.max_out, width=10).pack(side="left")
+        len_sf = SquircleField(opt, lambda p: tk.Entry(
+            p, textvariable=self.max_out, bg=FIELD, fg=TEXT, insertbackground=ACCENT,
+            relief="flat", bd=0, highlightthickness=0, font=("Segoe UI", 10)),
+            height=34)
+        len_sf.configure(width=110)
+        len_sf.pack(side="left")
 
         self.authorized = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -218,21 +336,24 @@ class GenTab(ttk.Frame):
 
         btns = ttk.Frame(self)
         btns.grid(row=r, column=0, columnspan=4, sticky="w"); r += 1
-        self.gen_btn = ttk.Button(btns, text="Generate", style="Accent.TButton",
-                                  command=self.on_generate)
+        self.gen_btn = SquircleButton(btns, "Generate", kind="accent",
+                                      command=self.on_generate)
         self.gen_btn.pack(side="left")
-        ttk.Button(btns, text="Save wordlist…", command=self.on_save).pack(side="left", padx=8)
-        ttk.Button(btns, text="Clear", command=self.on_clear).pack(side="left")
+        SquircleButton(btns, "Save wordlist…", command=self.on_save).pack(side="left", padx=SP[2])
+        SquircleButton(btns, "Clear", command=self.on_clear).pack(side="left")
 
         head2 = ttk.Frame(self)
-        head2.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(14, 4)); r += 1
+        head2.grid(row=r, column=0, columnspan=4, sticky="ew", pady=(SP[4], SP[1])); r += 1
         ttk.Label(head2, text="Preview (first 500)", style="Muted.TLabel").pack(side="left")
         self.count_lbl = ttk.Label(head2, text="0 records", style="Muted.TLabel")
         self.count_lbl.pack(side="right")
 
-        self.out = style_text(tk.Text(self, height=12, wrap="none",
-                                      font=("Consolas", 10)))
-        self.out.grid(row=r, column=0, columnspan=4, sticky="nsew")
+        # wordlist preview at the bottom (squircle-bordered)
+        out_sf = SquircleField(
+            self, lambda p: style_text(tk.Text(p, wrap="none", bd=0,
+                                               font=("Consolas", 10))))
+        out_sf.grid(row=r, column=0, columnspan=4, sticky="nsew")
+        self.out = out_sf.inner
         yscroll = ttk.Scrollbar(self, orient="vertical", command=self.out.yview)
         yscroll.grid(row=r, column=4, sticky="ns")
         self.out.config(yscrollcommand=yscroll.set)
@@ -240,18 +361,29 @@ class GenTab(ttk.Frame):
         self.columnconfigure(1, weight=1)
         self.rowconfigure(r, weight=1)
 
+    @staticmethod
+    def _mk_entry(parent):
+        return tk.Entry(parent, bg=FIELD, fg=TEXT, insertbackground=ACCENT,
+                        relief="flat", bd=0, highlightthickness=0,
+                        font=("Segoe UI", 10), disabledbackground=FIELD)
+
+    @staticmethod
+    def _mk_text(parent):
+        return style_text(tk.Text(parent, wrap="word", bd=0,
+                                  font=("Segoe UI", 10)))
+
     def _field(self, row, label, hint, height, attr):
-        ttk.Label(self, text=label).grid(row=row, column=0, sticky="nw", pady=4, padx=(0, 10))
+        ttk.Label(self, text=label).grid(row=row, column=0, sticky="nw",
+                                         pady=SP[1], padx=(0, SP[3]))
         if height == 1:
-            w = ttk.Entry(self)
-            w.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+            sf = SquircleField(self, self._mk_entry, height=34)
         else:
-            w = style_text(tk.Text(self, height=height, wrap="word",
-                                   font=("Segoe UI", 9)))
-            w.grid(row=row, column=1, columnspan=2, sticky="ew", pady=4)
+            px = height * 22 + 2 * SP[2]
+            sf = SquircleField(self, self._mk_text, height=px)
+        sf.grid(row=row, column=1, columnspan=2, sticky="ew", pady=SP[1])
         ttk.Label(self, text=hint, style="Hint.TLabel").grid(
-            row=row, column=3, sticky="w", padx=8)
-        setattr(self, attr, w)
+            row=row, column=3, sticky="w", padx=SP[2])
+        setattr(self, attr, sf.inner)
 
     def _get(self, w) -> str:
         if isinstance(w, tk.Text):
@@ -285,7 +417,7 @@ class GenTab(ttk.Frame):
         model = self.app.selected_model()
         base_words = self.app.base_words(self.profile)
         base_name = self.app.base_name_for(self.profile)
-        self.gen_btn.config(state="disabled")
+        self.gen_btn.set_enabled(False)
         self.app.set_status("Generating…")
 
         def work():
@@ -306,7 +438,7 @@ class GenTab(ttk.Frame):
         self.out.delete("1.0", "end")
         self.out.insert("1.0", "\n".join(words[:500]))
         self.count_lbl.config(text=f"{len(words)} records")
-        self.gen_btn.config(state="normal")
+        self.gen_btn.set_enabled(True)
         self.app.set_status(f"Ready — {len(words)} records generated.")
 
     def on_save(self):
@@ -381,9 +513,10 @@ class BrowseTab(ttk.Frame):
 
         btns = ttk.Frame(self)
         btns.grid(row=4, column=0, columnspan=6, sticky="w")
-        ttk.Button(btns, text="Open project page", command=self.open_page).pack(side="left")
-        ttk.Button(btns, text="Download to folder…", style="Accent.TButton",
-                   command=self.download).pack(side="left", padx=8)
+        SquircleButton(btns, text="Open project page",
+                       command=self.open_page).pack(side="left")
+        SquircleButton(btns, text="Download to folder…", kind="accent",
+                       command=self.download).pack(side="left", padx=8)
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
@@ -498,8 +631,8 @@ class WordForge(tk.Tk):
                                      state="readonly", width=38,
                                      values=[engine.BUILTIN_LABEL])
         self.model_cb.pack(side="left", padx=8)
-        ttk.Button(modelbar, text="Detect Ollama models",
-                   command=self.refresh_models).pack(side="left")
+        SquircleButton(modelbar, text="Detect Ollama models",
+                       command=self.refresh_models).pack(side="left")
         self.model_note = ttk.Label(modelbar, text="", style="Muted.TLabel")
         self.model_note.pack(side="left", padx=12)
 
