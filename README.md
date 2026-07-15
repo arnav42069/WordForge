@@ -123,7 +123,7 @@ To run from source instead:
 ```powershell
 # Install Python 3.10+ from https://python.org (tick "Add python.exe to PATH").
 # Tkinter is included in the official Windows installer.
-git clone https://github.com/<arnav42069>/WordForge.git
+git clone https://github.com/arnav42069/WordForge.git
 cd WordForge
 python app.py
 ```
@@ -154,7 +154,7 @@ sudo pacman -S python tk
 Then run from source:
 
 ```bash
-git clone https://github.com/<arnav42069>/WordForge.git
+git clone https://github.com/arnav42069/WordForge.git
 cd WordForge
 python3 app.py
 ```
