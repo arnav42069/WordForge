@@ -1,0 +1,14 @@
+# build artifacts
+build/
+dist/
+*.spec
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# local wordlist cache (downloaded public lists live in ~/.wordforge)
+*.txt.tmp
