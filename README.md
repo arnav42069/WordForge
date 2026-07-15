@@ -105,18 +105,70 @@ independent of any authorization to test one target.
 start/middle/end, plus PIN/phone/date-style pure numerics seeded from the
 target's numbers/years) — a very common real pattern, especially for WPA keys.
 
-## Run from source
-```bash
-python app.py             # needs Python 3.10+ with tkinter (stdlib)
-```
-No third-party runtime dependencies — everything uses the standard library.
+## Installation
 
-## Windows executable
-A prebuilt one-file exe is in `dist/WordForge.exe`. Rebuild it with:
+WordForge has **no third-party runtime dependencies** — it runs on the Python
+standard library (Tkinter). You need **Python 3.10+**. PyInstaller is only
+needed if you want to (re)build a standalone executable.
+
+### Windows
+
+The fastest path is the prebuilt one-file executable — no Python required:
+
+1. Grab `dist/WordForge.exe` from the repo (or build it, below).
+2. Double-click it. That's it — the exe bundles Python and Tkinter.
+
+To run from source instead:
+
+```powershell
+# Install Python 3.10+ from https://python.org (tick "Add python.exe to PATH").
+# Tkinter is included in the official Windows installer.
+git clone https://github.com/<your-username>/WordForge.git
+cd WordForge
+python app.py
+```
+
+Build the exe yourself:
+
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --windowed --name WordForge app.py
+# result: dist\WordForge.exe
+```
+
+### Linux
+
+Tkinter is **not** bundled with Python on most distros — install it first:
+
+```bash
+# Debian / Ubuntu / Kali / Mint
+sudo apt update && sudo apt install -y python3 python3-tk
+
+# Fedora / RHEL
+sudo dnf install -y python3 python3-tkinter
+
+# Arch / Manjaro
+sudo pacman -S python tk
+```
+
+Then run from source:
+
+```bash
+git clone https://github.com/<your-username>/WordForge.git
+cd WordForge
+python3 app.py
+```
+
+Optionally build a standalone Linux binary (produces `dist/WordForge`):
+
 ```bash
 pip install pyinstaller
 pyinstaller --onefile --windowed --name WordForge app.py
+./dist/WordForge
 ```
+
+> The one-file exe/binary is platform-specific: build it on the OS you intend
+> to run it on (a Windows `.exe` won't run on Linux and vice-versa).
 
 ## Files
 | file | purpose |
