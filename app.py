@@ -276,7 +276,7 @@ class GenTab(ttk.Frame):
     """Shared UI for the wifi / email generation modes."""
 
     def __init__(self, master, profile: str, app: "WordForge"):
-        super().__init__(master, padding=SP[6])
+        super().__init__(master, padding=SP[4])
         self.profile = profile
         self.app = app
         self.results: list[str] = []
@@ -359,7 +359,10 @@ class GenTab(ttk.Frame):
         self.out.config(yscrollcommand=yscroll.set)
 
         self.columnconfigure(1, weight=1)
-        self.rowconfigure(r, weight=1)
+        # minsize guarantees the preview stays visible even when the stacked
+        # input fields are taller than the tab (grid otherwise dumps the whole
+        # height shortfall onto this, the only weighted, row).
+        self.rowconfigure(r, weight=1, minsize=200)
 
     @staticmethod
     def _mk_entry(parent):
@@ -592,8 +595,8 @@ class WordForge(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(APP_TITLE)
-        self.geometry("900x720")
-        self.minsize(780, 600)
+        self.geometry("900x820")
+        self.minsize(780, 640)
         apply_dark_theme(self)
 
         # header banner with a subtle geometric pattern (canvas backdrop)
