@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import random
 import json
+import re
 
 import baselist
 
@@ -126,6 +127,24 @@ class PasswordModel:
             out.append(nxt)
             context += nxt
         return "".join(out)
+
+    def word_of_length(self, n: int) -> str:
+        """Return an ALPHA-only string of exactly ``n`` chars, sampled from the
+        learned distribution where possible. Used by the PCFG to fill the alpha
+        slots of a chosen structure with realistic, model-generated letters."""
+        if n <= 0:
+            return ""
+        best = ""
+        for _ in range(4):
+            s = re.sub(r"[^A-Za-z]", "", self.sample())
+            if len(s) >= n:
+                return s[:n].lower()
+            if len(s) > len(best):
+                best = s
+        # pad with frequency-ish English letters if the sample was too short
+        letters = "etaoinshrdlcumwfgypbvkjxqz"
+        best = (best + "".join(random.choice(letters) for _ in range(n)))
+        return best[:n].lower()
 
     def complete(self, seed: str, max_len: int = 20) -> str:
         """Append a learned, realistic tail (digits/symbols) to a seed token."""

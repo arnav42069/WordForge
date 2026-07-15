@@ -20,6 +20,7 @@ import engine
 import catalog
 import localmodel
 import baselist
+import pcfg
 
 APP_TITLE = "WordForge — Wordlist Builder (Authorized Testing Only)"
 DISCLAIMER = (
@@ -319,6 +320,9 @@ class GenTab(ttk.Frame):
         opt.grid(row=r, column=0, columnspan=4, sticky="w", pady=(10, 4)); r += 1
         self.use_leet = tk.BooleanVar(value=True)
         ttk.Checkbutton(opt, text="Leetspeak variants", variable=self.use_leet).pack(side="left")
+        self.use_corp = tk.BooleanVar(value=(profile == "email"))
+        ttk.Checkbutton(opt, text="Corporate / seasonal defaults",
+                        variable=self.use_corp).pack(side="left", padx=(SP[3], 0))
         ttk.Label(opt, text="Length (records):", style="Muted.TLabel").pack(side="left", padx=(SP[5], SP[1]))
         self.max_out = tk.StringVar(value="250000")
         len_sf = SquircleField(opt, lambda p: tk.Entry(
@@ -428,7 +432,8 @@ class GenTab(ttk.Frame):
                 words = engine.generate(
                     target, self.profile, model, self.use_leet.get(),
                     length, progress=self.app.set_status,
-                    base_words=base_words, base_name=base_name)
+                    base_words=base_words, base_name=base_name,
+                    corporate=self.use_corp.get())
             except Exception as e:  # noqa: BLE001
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
                 words = []
@@ -650,8 +655,9 @@ class WordForge(tk.Tk):
         ttk.Label(self, textvariable=self.status, style="Status.TLabel",
                   anchor="w").pack(fill="x", side="bottom")
 
-        # warm the built-in model (trains on first use) + probe Ollama
+        # warm the built-in models (train on first use) + probe Ollama
         run_thread(localmodel.get_model)
+        run_thread(pcfg.get_pcfg)
         self.refresh_models()
         # auto-update Browse + ensure a real base wordlist exists (public lists
         # only — no breach data is ever fetched)
@@ -675,7 +681,9 @@ class WordForge(tk.Tk):
         ep = self.bases["email"]["path"]
         if ep:
             try:
-                localmodel.reseed_from_words(baselist.load_file(ep))
+                words = baselist.load_file(ep)
+                localmodel.reseed_from_words(words)
+                pcfg.reseed(words)          # mine structures from the real corpus
             except Exception:  # noqa: BLE001
                 pass
         # 2) check the curated public lists for newer versions.
@@ -721,8 +729,9 @@ class WordForge(tk.Tk):
         def work():
             try:
                 words = baselist.load_file(path, max_lines=2_000_000)
-                if profile == "email":          # retrain model on passwords base
+                if profile == "email":          # retrain models on passwords base
                     localmodel.reseed_from_words(words[:300000])
+                    pcfg.reseed(words[:300000])
                 self.after(0, lambda: self.base_vars[profile].set(name))
                 self.after(0, lambda: self.set_status(
                     f"{profile} base set to {name} ({len(words)} passwords)."))

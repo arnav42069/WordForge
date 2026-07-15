@@ -20,6 +20,7 @@ produces candidate strings to a local file, which is what a wordlist tool does.
 
 from __future__ import annotations
 
+import datetime
 import itertools
 import json
 import random
@@ -30,8 +31,12 @@ from dataclasses import dataclass, field
 
 import localmodel
 import baselist
+import pcfg
 
 OLLAMA_URL = "http://localhost:11434"
+
+# "Current" year window, used for corporate/seasonal defaults and blends.
+CUR_YEAR = datetime.date.today().year
 
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -105,6 +110,195 @@ def _leet_variants(word: str, max_variants: int = 6) -> set[str]:
     return out
 
 
+# --- smart (human-like) leetspeak ----------------------------------------- #
+# A single, common substitution per eligible position rather than the full
+# combinatorial explosion — real people leet one or two letters, not all of
+# them, so this avoids junk like "p455w0rd".
+_SMART_LEET = {"a": "@", "e": "3", "i": "1", "o": "0", "s": "$", "t": "7"}
+
+
+def smart_leet(word: str, max_variants: int = 4) -> set[str]:
+    """Partial, capitalization-preserving leet: swap only the first eligible
+    letter, only the last, or a leading-cap + one swap. Human, not exhaustive."""
+    out: set[str] = set()
+    idxs = [i for i, ch in enumerate(word) if ch.lower() in _SMART_LEET]
+    if not idxs:
+        return out
+    for pos in (idxs[0], idxs[-1]):
+        chars = list(word)
+        chars[pos] = _SMART_LEET[chars[pos].lower()]
+        out.add("".join(chars))
+    # Capitalize first letter, leet the last eligible — a very common shape.
+    chars = list(word.capitalize())
+    chars[idxs[-1]] = _SMART_LEET[word[idxs[-1]].lower()]
+    out.add("".join(chars))
+    return set(list(out)[:max_variants])
+
+
+# --- keyboard walks + adjacency ------------------------------------------- #
+_QWERTY_ROWS = ["1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm"]
+
+# map each key to the key one position to its right on the same row (wraps off
+# the end -> unchanged), for "keyboard-shifted" mutations of a keyword.
+_KEY_RIGHT: dict[str, str] = {}
+for _row in _QWERTY_ROWS:
+    for _i, _c in enumerate(_row[:-1]):
+        _KEY_RIGHT[_c] = _row[_i + 1]
+        _KEY_RIGHT[_c.upper()] = _row[_i + 1].upper()
+
+# Common spatial patterns people actually pick as passwords.
+KEYBOARD_WALKS = [
+    "qwerty", "qwertyuiop", "qwerty123", "qwertyui", "asdf", "asdfgh",
+    "asdfghjkl", "zxcvbn", "zxcvbnm", "zxcvbnm123", "1qaz", "2wsx", "3edc",
+    "1qaz2wsx", "1qaz2wsx3edc", "qazwsx", "qazwsxedc", "1q2w3e", "1q2w3e4r",
+    "1q2w3e4r5t", "qweasd", "qweasdzxc", "qazxsw", "poiuy", "poiuytrewq",
+    "mnbvcxz", "lkjhgf", "0okm", "9ijn", "zaq1", "zaq12wsx",
+]
+
+
+def keyboard_shift(word: str) -> str:
+    """Shift every key one position right on QWERTY (bella -> nq;;s style)."""
+    return "".join(_KEY_RIGHT.get(ch, ch) for ch in word)
+
+
+def keyboard_walk_candidates(t: Target) -> list[str]:
+    out: list[str] = list(KEYBOARD_WALKS)
+    kws = list(t.keywords)
+    if t.ssid:
+        kws = [t.ssid] + kws
+    for kw in kws:
+        low = re.sub(r"\s+", "", kw.lower())
+        if not low:
+            continue
+        sh = keyboard_shift(low)
+        if sh and sh != low:
+            out.append(sh)
+    return list(dict.fromkeys(out))
+
+
+# --- contextual token blending -------------------------------------------- #
+def _clean_kw(t: Target, profile: str) -> list[str]:
+    kws = list(t.keywords)
+    if t.ssid:
+        kws = [t.ssid] + kws
+    out = []
+    for kw in kws:
+        if profile == "email" and (EMAIL_RE.match(kw) or "@" in kw):
+            continue
+        out.append(kw)
+    return out
+
+
+def blend_candidates(t: Target, profile: str, max_out: int = 4000) -> list[str]:
+    """Permute keywords with years/numbers/specials into the highly-probable
+    human templates: [Cap][Year], [Year][Cap], [Keyword][Special][Digit], …"""
+    kws = _clean_kw(t, profile)
+    years = list(t.years) + [str(CUR_YEAR), str(CUR_YEAR - 1)]
+    years = list(dict.fromkeys(years))
+    nums = list(t.numbers)
+    specials = ["!", "@", "#", "$", "."]
+    digits = ["1", "12", "123", "01", "007"]
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def emit(w: str) -> bool:
+        if w and w not in seen:
+            seen.add(w)
+            out.append(w)
+        return len(out) < max_out
+
+    for kw in kws:
+        cap = re.sub(r"\s+", "", kw).capitalize()
+        low = re.sub(r"\s+", "", kw).lower()
+        if not cap:
+            continue
+        for y in years:
+            for w in (cap + y, y + cap, low + y, cap + "!" + y, cap + "@" + y):
+                if not emit(w):
+                    return out
+        for n in nums:
+            for w in (cap + n, n + cap, cap + "!" + n, low + n):
+                if not emit(w):
+                    return out
+        for s in specials:
+            for d in digits:
+                if not emit(cap + s + d):
+                    return out
+            if not emit(cap + s):
+                return out
+    return out
+
+
+# --- corporate & seasonal defaults (target-specific OSINT) ---------------- #
+_SEASONS = ["Spring", "Summer", "Autumn", "Fall", "Winter"]
+_CORP_WORDS = ["Welcome", "Password", "Passw0rd", "Changeme", "ChangeMe",
+               "Admin", "Letmein", "Login", "Default", "Company", "Temp"]
+
+
+def corporate_seasonal_candidates(t: Target, profile: str,
+                                  base_year: int | None = None,
+                                  max_out: int = 6000) -> list[str]:
+    """Season/year + corporate-placeholder passwords (Spring2026, Winter26!,
+    Welcome2025!, Company123) combined with the target's company token."""
+    y = base_year or CUR_YEAR
+    year_ints = [y, y + 1, y - 1, y - 2]
+    yy = [str(v) for v in year_ints] + [str(v)[2:] for v in year_ints]
+    yy = list(dict.fromkeys(yy))
+    tails = ["", "!", "#", "1", "123", "!@#"]
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def emit(w: str) -> bool:
+        if w and w not in seen:
+            seen.add(w)
+            out.append(w)
+        return len(out) < max_out
+
+    for season in _SEASONS:
+        for ys in yy:
+            for tl in ("", "!", "#"):
+                if not emit(season + ys + tl):
+                    return out
+            if not emit(season.lower() + ys):
+                return out
+    for word in _CORP_WORDS:
+        for ys in yy + [""]:
+            for tl in tails:
+                if not emit(word + ys + tl):
+                    return out
+
+    for comp in _clean_kw(t, profile):
+        cc = re.sub(r"\s+", "", comp).capitalize()
+        if not cc:
+            continue
+        for ys in yy + [""]:
+            for w in (cc + ys, cc + "@" + ys, cc + ys + "!", cc + "123",
+                      "Welcome" + cc, cc + "Admin"):
+                if not emit(w):
+                    return out
+    return out
+
+
+# --- PCFG-backed structural candidates ------------------------------------ #
+def pcfg_seeded(t: Target, profile: str, n: int) -> list[str]:
+    """Structure-aware personalized candidates: real password shapes filled
+    with the target's own tokens (+ Markov terminals)."""
+    if n <= 0:
+        return []
+    tokens = _base_tokens(t, profile)
+    return pcfg.get_pcfg().generate(n, tokens=tokens, years=t.years,
+                                    numbers=t.numbers)
+
+
+def pcfg_free(n: int) -> list[str]:
+    """Novel candidates drawn from the mined structure distribution."""
+    if n <= 0:
+        return []
+    return pcfg.get_pcfg().generate(n)
+
+
 def _base_tokens(t: Target, profile: str = "email") -> list[str]:
     tokens: set[str] = set()
     kws = list(t.keywords)
@@ -154,7 +348,9 @@ def rule_candidates(t: Target, profile: str = "email", use_leet: bool = True,
     for base in bases:
         variants = {base}
         if use_leet:
-            variants |= _leet_variants(base, max_variants=3)
+            # human-like partial leet first; a couple of exhaustive ones too
+            variants |= smart_leet(base, max_variants=4)
+            variants |= _leet_variants(base, max_variants=2)
         for v in variants:
             for pre in ("", "!", "@"):
                 for suf in affixes:
@@ -194,38 +390,43 @@ def ollama_status() -> tuple[bool, list[str]]:
         return False, []
 
 
-_LLM_SYSTEM = (
-    "You assist an AUTHORIZED penetration tester who is auditing a system they "
-    "have written permission to test. Given target context, output plausible "
-    "PASSWORD CANDIDATES a real user might have chosen, one per line, no "
-    "numbering, no commentary, no code fences. Favor realistic human patterns: "
-    "names+years, pet+special chars, keyboard walks, leetspeak, local sports "
-    "teams, and simple mutations. Output only candidate strings."
+# Psychology-optimized auditor prompt. {context} / {count} are filled per call.
+_LLM_SYSTEM_TMPL = (
+    "Act as an authorized password security auditor. Given the following target "
+    "context: {context}, generate {count} highly realistic password variations "
+    "that a human would actually create. Mimic common human patterns, structural "
+    "variations, and subtle typos. Output raw strings only, one per line. Do not "
+    "include any conversational text, explanations, or numbering."
 )
+
+
+def _context_tokens(t: Target) -> str:
+    bits: list[str] = []
+    if t.ssid:
+        bits.append(f"network SSID '{t.ssid}'")
+    if t.keywords:
+        bits.append("keywords " + ", ".join(t.keywords))
+    if t.years:
+        bits.append("years/dates " + ", ".join(t.years))
+    if t.numbers:
+        bits.append("numbers " + ", ".join(t.numbers))
+    if t.notes:
+        bits.append("notes: " + t.notes)
+    return "; ".join(bits) if bits else "no specific context"
 
 
 def ollama_candidates(t: Target, model: str, profile: str, want: int = 300,
                       timeout: int = 120) -> list[str]:
-    ctx_lines = []
-    if t.keywords:
-        ctx_lines.append("Keywords: " + ", ".join(t.keywords))
-    if t.years:
-        ctx_lines.append("Relevant years/dates: " + ", ".join(t.years))
-    if t.numbers:
-        ctx_lines.append("Relevant numbers: " + ", ".join(t.numbers))
-    if t.notes:
-        ctx_lines.append("Notes: " + t.notes)
-    constraint = ("These are Wi-Fi WPA2 passphrases (8-63 chars)."
+    system = _LLM_SYSTEM_TMPL.format(context=_context_tokens(t), count=want)
+    constraint = ("Constraint: these are Wi-Fi WPA2 passphrases, 8-63 characters."
                   if profile == "wifi" else
-                  "These are website/account passwords (usually 6-16 chars).")
-    prompt = (
-        f"{constraint}\nTarget context:\n" + "\n".join(ctx_lines) +
-        f"\n\nProduce up to {want} candidate passwords, one per line."
-    )
+                  "Constraint: these are website/account passwords, usually 6-16 "
+                  "characters.")
+    prompt = f"{constraint}\nOutput {want} candidate passwords now, one per line."
     payload = {
         "model": model,
         "prompt": prompt,
-        "system": _LLM_SYSTEM,
+        "system": system,
         "stream": False,
         "options": {"temperature": 0.9, "top_p": 0.95},
     }
@@ -464,16 +665,19 @@ def _is_ollama_choice(model: str | None) -> bool:
 def generate(t: Target, profile: str, model: str | None,
              use_leet: bool, length: int, progress=None,
              base_words: list[str] | None = None,
-             base_name: str = "Built-in common passwords") -> list[str]:
+             base_name: str = "Built-in common passwords",
+             corporate: bool = False) -> list[str]:
     """Build a de-duplicated, profile-filtered wordlist of EXACTLY `length`
-    records (or as close as the sources allow), by *appending onto an existing
-    base wordlist* which is included in full.
+    records (or as close as the sources allow).
 
-    Order (targeted, high-signal guesses first, then the whole base, then fill):
-      1. SSID-centric candidates (wifi)         + personalized model completions
-      2. keyword mutations of the target        + numeric-heavy candidates
-      3. the ENTIRE selected base wordlist, appended
-      4. fill up to `length` with numeric-heavy candidates, then model samples
+    Composition (feature: frequency-based adaptive interleaving):
+      * TOP BLOCK  — high-signal targeted context: SSID+date (wifi), blended
+        tokens, corporate/seasonal defaults, PCFG-structured + Markov-seeded
+        completions, keyword mutations (smart leet), keyboard walks.
+      * BODY       — the selected base wordlist kept in its native real-world
+        FREQUENCY ORDER (e.g. RockYou), woven together with model/PCFG samples
+        using a DIMINISHING curve: few synthetic samples near the high-value top
+        of the base, progressively more toward the bottom to reach `length`.
     """
     def report(msg):
         if progress:
@@ -495,8 +699,6 @@ def generate(t: Target, profile: str, model: str | None,
                 return False
         return True
 
-    full = False
-
     # optional 3rd-party LLM first (usually highest quality)
     if _is_ollama_choice(model):
         try:
@@ -505,54 +707,99 @@ def generate(t: Target, profile: str, model: str | None,
         except Exception as e:  # noqa: BLE001
             report(f"Ollama call failed ({e}); using built-in model + rules.")
 
-    # Reserve room so the ENTIRE base wordlist is always appended. Targeted
-    # additions (SSID/date/keyword/numeric) get the rest, capped so a big base
-    # still fits and a small base still leaves room for lots of targeted guesses.
     base_pool = apply_profile(list(base_words), profile)
-    if len(base_pool) <= length:
-        targeted_cap = length - len(base_pool)
-    else:
-        targeted_cap = min(length // 3, 120000)
-    targeted_cap = max(0, min(targeted_cap, length))
 
-    def targeted_take(words):
+    # Size of the high-signal TOP block.
+    #  * wifi: generous — the SSID+date material IS the deliverable, so it gets
+    #    all the room the base doesn't need.
+    #  * email/account: bound to ~10% (feature D), leaving ~90% for the base +
+    #    adaptive AI body so the frequency curve has room to work.
+    if profile == "wifi":
+        top_cap = (length - len(base_pool)) if len(base_pool) <= length \
+            else min(length // 3, 120000)
+    else:
+        top_cap = max(length // 10, 200)
+    top_cap = max(0, min(top_cap, length))
+
+    def top_take(words):
         for w in words:
-            if len(final) >= targeted_cap or len(final) >= length:
+            if len(final) >= top_cap or len(final) >= length:
                 return
             if w and w not in seen:
                 seen.add(w)
                 final.append(w)
 
-    # 1. SSID-centric: initial/acronym + date first (high-yield router pattern),
-    #    then name + common tails.
+    # ---- TOP BLOCK: targeted, high-probability guesses ---------------------
     if profile == "wifi" and t.ssid:
         report(f"Building SSID+date candidates from '{t.ssid}'...")
-        targeted_take(apply_profile(
-            dated_ssid_candidates(t, min(targeted_cap, 200000)), profile))
+        top_take(apply_profile(
+            dated_ssid_candidates(t, min(top_cap, 200000)), profile))
         report(f"Building candidates from SSID '{t.ssid}'...")
-        targeted_take(apply_profile(ssid_candidates(t, min(targeted_cap, 60000)), profile))
-    targeted_take(apply_profile(builtin_seeded(t, profile), profile))
-
-    # 2. keyword mutations + numeric-heavy (target-specific additions)
+        top_take(apply_profile(ssid_candidates(t, min(top_cap, 60000)), profile))
+    report("Blending target tokens...")
+    top_take(apply_profile(blend_candidates(t, profile), profile))
+    if corporate:
+        report("Corporate / seasonal defaults...")
+        top_take(apply_profile(
+            corporate_seasonal_candidates(t, profile), profile))
+    report("Structure-aware (PCFG) candidates...")
+    top_take(apply_profile(pcfg_seeded(t, profile, min(top_cap, 8000)), profile))
+    top_take(apply_profile(builtin_seeded(t, profile), profile))
     if t.keywords or t.numbers or t.years:
-        report("Keyword mutations...")
-        targeted_take(apply_profile(
+        report("Keyword mutations (smart leet)...")
+        top_take(apply_profile(
             rule_candidates(t, profile, use_leet=use_leet, max_out=5000), profile))
-    report("Numeric-heavy candidates...")
-    targeted_take(apply_profile(
-        numeric_heavy_candidates(t, profile, min(targeted_cap, 40000)), profile))
+    report("Keyboard walks...")
+    top_take(apply_profile(keyboard_walk_candidates(t), profile))
+    top_take(apply_profile(
+        numeric_heavy_candidates(t, profile, min(top_cap, 20000)), profile))
 
-    # 3. append the ENTIRE selected base wordlist
-    report(f"Appending base wordlist '{base_name}'...")
-    full = not take(base_pool)
+    # ---- AI SAMPLE STREAM: lazy, profile-filtered, deduped by take() -------
+    def ai_stream():
+        spins = 0
+        cap = length * 30 + 5000
+        while spins < cap:
+            batch = apply_profile(
+                pcfg_free(300) + builtin_free(200)
+                + numeric_heavy_candidates(t, profile, 500), profile)
+            if not batch:
+                break
+            for w in batch:
+                spins += 1
+                yield w
 
-    # 4. fill up to the requested length (numeric space is effectively unlimited)
-    if not full and len(final) < length:
-        report(f"Filling to {length} records...")
-        need = length - len(final)
-        take(apply_profile(numeric_heavy_candidates(t, profile, need + 500), profile))
+    ai = ai_stream()
+
+    # ---- BODY: base in frequency order, adaptive diminishing AI density ----
+    report(f"Interleaving base '{base_name}' (adaptive AI density)...")
+    B = len(base_pool)
+    remaining = length - len(final)
+    if remaining > 0 and B == 0:
+        for w in ai:
+            if not take([w]):
+                break
+    elif remaining > 0:
+        ai_budget = max(0, remaining - B)   # synthetic samples woven through base
+        gamma = 2.2                          # >1 => sparse at top, dense at bottom
+        injected = 0
+        done = False
+        for i, bw in enumerate(base_pool):
+            target = int(ai_budget * (i / B) ** gamma)
+            while injected < target:
+                nxt = next(ai, None)
+                if nxt is None:
+                    break
+                if not take([nxt]):
+                    done = True
+                    break
+                injected += 1
+            if done or not take([bw]):
+                break
+        # top up to the exact requested length with the remaining AI stream
         if len(final) < length:
-            take(apply_profile(builtin_free(length - len(final) + 500), profile))
+            for w in ai:
+                if not take([w]):
+                    break
 
-    report(f"Done: {len(final)} records (appended onto: {base_name}).")
+    report(f"Done: {len(final)} records (base '{base_name}' interleaved).")
     return final
